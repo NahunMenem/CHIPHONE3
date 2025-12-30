@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import (
+from routers import (
     auth,
     ventas,
     productos,
@@ -13,6 +13,7 @@ from app.routers import (
     exportaciones,
     tienda,
 )
+
 
 app = FastAPI(
     title="Sistema Comercial SJ",
