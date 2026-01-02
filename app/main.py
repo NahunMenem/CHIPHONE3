@@ -953,18 +953,24 @@ def eliminar_categoria(nombre: str, db=Depends(get_db)):
 
 @app.get("/productos")
 def listar_productos(busqueda: str | None = None, db=Depends(get_db)):
-    cur = db.cursor()
+    cur = db.cursor(cursor_factory=DictCursor)
 
     if busqueda:
         cur.execute("""
             SELECT *
             FROM productos_sj
-            WHERE nombre ILIKE %s OR codigo_barras ILIKE %s OR num ILIKE %s
+            WHERE nombre ILIKE %s
+               OR codigo_barras ILIKE %s
+               OR num ILIKE %s
         """, (f"%{busqueda}%", f"%{busqueda}%", f"%{busqueda}%"))
     else:
         cur.execute("SELECT * FROM productos_sj")
 
-    return cur.fetchall()
+    rows = cur.fetchall()
+
+    # 🔥 CONVERSIÓN CLAVE
+    return [dict(row) for row in rows]
+
 
 
 @app.post("/productos")
