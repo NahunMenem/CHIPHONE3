@@ -1,424 +1,1124 @@
-from fastapi import FastAPI, Request, Form, UploadFile, File, HTTPException, Depends
-from fastapi.responses import JSONResponse, StreamingResponse
+# main.py
+from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.sessions import SessionMiddleware
+
 import psycopg2
 from psycopg2.extras import DictCursor
 from datetime import datetime, timedelta
 import pytz
 import os
+
 import cloudinary
 import cloudinary.uploader
-from io import BytesIO
-from openpyxl import Workbook
-import unicodedata
 
 # =====================================================
-# APP
+# CONFIG
 # =====================================================
-app = FastAPI(title="Sistema Comercial SJ")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# =====================================================
-# CLOUDINARY
-# =====================================================
 cloudinary.config(
     cloud_name="dcbdjnpzo",
     api_key="381622333637456",
     api_secret="P1Pzvu85aCR02HuRSCnz76yzrgg"
 )
 
+app = FastAPI(title="Backend SJ")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # luego se ajusta a Next
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=os.getenv("SECRET_KEY", "change-me"),
+)
+
 # =====================================================
 # DB
 # =====================================================
+
 def get_db():
     dsn = os.getenv("DATABASE_URL")
     if not dsn:
-        raise RuntimeError("DATABASE_URL no definido")
-    return psycopg2.connect(dsn, cursor_factory=DictCursor, sslmode="require")
+        raise RuntimeError("Falta DATABASE_URL")
+    conn = psycopg2.connect(dsn, cursor_factory=DictCursor, sslmode="require")
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 # =====================================================
-# HELPERS
+# INIT TABLES
 # =====================================================
-def normalizar(texto):
-    return unicodedata.normalize("NFKD", texto).encode("ASCII", "ignore").decode().lower().strip()
 
-arg_tz = pytz.timezone("America/Argentina/Buenos_Aires")
+def crear_tabla_usuarios():
+    conn = psycopg2.connect(os.getenv("DATABASE_URL"), cursor_factory=DictCursor, sslmode="require")
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS usuarios (
+            id SERIAL PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'user'
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def crear_tabla_equipos():
+    conn = psycopg2.connect(os.getenv("DATABASE_URL"), cursor_factory=DictCursor, sslmode="require")
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS equipos_sj (
+            id SERIAL PRIMARY KEY,
+            tipo_reparacion TEXT NOT NULL,
+            marca TEXT NOT NULL,
+            modelo TEXT NOT NULL,
+            tecnico TEXT NOT NULL,
+            monto REAL NOT NULL,
+            nombre_cliente TEXT NOT NULL,
+            telefono TEXT NOT NULL,
+            nro_orden TEXT NOT NULL,
+            fecha TEXT NOT NULL,
+            hora TEXT NOT NULL
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+crear_tabla_usuarios()
+crear_tabla_equipos()
+
+# =====================================================
+# AUTH HELPERS
+# =====================================================
+
+def require_login(request: Request):
+    if "username" not in request.session:
+        raise HTTPException(status_code=401, detail="No autenticado")
+    return request.session["username"]
 
 # =====================================================
 # AUTH
 # =====================================================
+
 @app.post("/login")
-def login(username: str = Form(...), password: str = Form(...)):
-    conn = get_db()
-    cur = conn.cursor()
+def login(data: dict, request: Request, db=Depends(get_db)):
+    username = data.get("username")
+    password = data.get("password")
+
+    cur = db.cursor()
     cur.execute("SELECT * FROM usuarios WHERE username=%s", (username,))
     user = cur.fetchone()
-    conn.close()
 
     if not user or user["password"] != password:
-        raise HTTPException(401, "Credenciales inválidas")
+        raise HTTPException(status_code=401, detail="Credenciales inválidas")
 
-    return {"username": user["username"], "role": user["role"]}
+    request.session["username"] = user["username"]
+    request.session["role"] = user["role"]
+
+    return {"ok": True, "username": user["username"], "role": user["role"]}
+
+@app.post("/logout")
+def logout(request: Request):
+    request.session.clear()
+    return {"ok": True}
+
+@app.get("/me")
+def me(username=Depends(require_login), request: Request = None):
+    return {
+        "username": request.session.get("username"),
+        "role": request.session.get("role"),
+    }
 
 # =====================================================
-# PRODUCTOS / STOCK
+# CARRITO
 # =====================================================
-@app.get("/productos")
-def productos(busqueda: str | None = None):
-    conn = get_db()
-    cur = conn.cursor()
 
-    if busqueda:
-        cur.execute("""
-            SELECT
-                id,
-                nombre,
-                codigo_barras,
-                stock,
-                precio,
-                precio_costo,
-                categoria,
-                num,
-                color,
-                bateria,
-                precio_revendedor,
-                condicion
-            FROM productos_sj
-            WHERE nombre ILIKE %s
-               OR codigo_barras ILIKE %s
-               OR num ILIKE %s
-            ORDER BY nombre
-        """, (f"%{busqueda}%", f"%{busqueda}%", f"%{busqueda}%"))
-    else:
-        cur.execute("""
-            SELECT
-                id,
-                nombre,
-                codigo_barras,
-                stock,
-                precio,
-                precio_costo,
-                categoria,
-                num,
-                color,
-                bateria,
-                precio_revendedor,
-                condicion
-            FROM productos_sj
-            ORDER BY nombre
-        """)
+@app.post("/carrito/agregar")
+def agregar_carrito(data: dict, request: Request, db=Depends(get_db)):
+    if "carrito" not in request.session:
+        request.session["carrito"] = []
 
-    columnas = [desc[0] for desc in cur.description]
-    data = [dict(zip(columnas, fila)) for fila in cur.fetchall()]
+    producto_id = data.get("producto_id")
+    cantidad = int(data.get("cantidad", 1))
 
-    conn.close()
-    return data
+    cur = db.cursor()
+    cur.execute(
+        "SELECT id, nombre, stock, precio FROM productos_sj WHERE id=%s",
+        (producto_id,),
+    )
+    prod = cur.fetchone()
 
+    if not prod or prod["stock"] < cantidad:
+        raise HTTPException(status_code=400, detail="Stock insuficiente")
 
-@app.post("/productos")
-def agregar_producto(
-    nombre: str = Form(...),
-    codigo_barras: str = Form(...),
-    stock: int = Form(...),
-    precio: float = Form(...),
-    precio_costo: float = Form(...),
-    categoria: str = Form(None),
-    num: str = Form(None),
-    color: str = Form(None),
-    bateria: str = Form(None),
-    precio_revendedor: float = Form(None),
-    condicion: str = Form(None),
-    foto: UploadFile = File(None)
+    item = {
+        "id": prod["id"],
+        "nombre": prod["nombre"],
+        "precio": float(prod["precio"]),
+        "cantidad": cantidad,
+        "tipo_precio": "venta",
+    }
+
+    request.session["carrito"].append(item)
+    request.session.modified = True
+
+    return {"ok": True, "carrito": request.session["carrito"]}
+
+@app.post("/carrito/agregar-manual")
+def agregar_manual(data: dict, request: Request):
+    if "carrito" not in request.session:
+        request.session["carrito"] = []
+
+    item = {
+        "id": None,
+        "nombre": data["nombre"],
+        "precio": float(data["precio"]),
+        "cantidad": int(data["cantidad"]),
+        "tipo_precio": "manual",
+    }
+
+    request.session["carrito"].append(item)
+    request.session.modified = True
+
+    return {"ok": True}
+
+@app.post("/carrito/vaciar")
+def vaciar_carrito(request: Request):
+    request.session.pop("carrito", None)
+    return {"ok": True}
+
+@app.get("/carrito")
+def ver_carrito(request: Request):
+    carrito = request.session.get("carrito", [])
+    total = sum(i["precio"] * i["cantidad"] for i in carrito)
+    return {"items": carrito, "total": total}
+
+# =====================================================
+# PRECIOS ACTUALIZADOS
+# =====================================================
+
+@app.get("/api/carrito/precios_actualizados")
+def precios_actualizados(tipo_precio: str = "venta", request: Request = None, db=Depends(get_db)):
+    carrito = request.session.get("carrito", [])
+    cur = db.cursor()
+
+    nuevos = []
+
+    for item in carrito:
+        if item["id"]:
+            cur.execute(
+                "SELECT precio, precio_revendedor FROM productos_sj WHERE id=%s",
+                (item["id"],),
+            )
+            p = cur.fetchone()
+            precio = float(p["precio"] if tipo_precio == "venta" else p["precio_revendedor"])
+            nuevos.append({
+                "nombre": item["nombre"],
+                "cantidad": item["cantidad"],
+                "precio": precio,
+            })
+        else:
+            nuevos.append(item)
+
+    return nuevos
+
+# =====================================================
+# PRODUCTOS MÁS VENDIDOS
+# =====================================================
+
+@app.get("/productos_mas_vendidos")
+def productos_mas_vendidos(db=Depends(get_db)):
+    cur = db.cursor()
+
+    cur.execute("""
+        SELECT nombre, precio, cantidad_vendida
+        FROM productos_sj
+        ORDER BY cantidad_vendida DESC
+        LIMIT 5
+    """)
+    productos = cur.fetchall()
+
+    cur.execute("SELECT SUM(cantidad_vendida) FROM productos_sj")
+    total = cur.fetchone()[0] or 0
+
+    return {
+        "total_ventas": total,
+        "productos": [
+            {
+                "nombre": p["nombre"],
+                "precio": float(p["precio"]),
+                "cantidad": p["cantidad_vendida"],
+                "porcentaje": round((p["cantidad_vendida"] / total) * 100, 2) if total else 0,
+            }
+            for p in productos
+        ],
+    }
+
+# =====================================================
+# PRODUCTOS MÁS VENDIDOS (DETALLADO)
+# =====================================================
+
+@app.get("/productos_mas_vendidos/detalle")
+def productos_mas_vendidos_detalle(db=Depends(get_db)):
+    cur = db.cursor()
+
+    cur.execute("""
+        SELECT nombre, precio, cantidad_vendida
+        FROM productos_sj
+        ORDER BY cantidad_vendida DESC
+        LIMIT 5
+    """)
+    productos = cur.fetchall()
+
+    cur.execute("SELECT SUM(cantidad_vendida) FROM productos_sj")
+    total_ventas = cur.fetchone()[0] or 0
+
+    productos_con_porcentaje = []
+    for p in productos:
+        porcentaje = (p["cantidad_vendida"] / total_ventas * 100) if total_ventas > 0 else 0
+        productos_con_porcentaje.append({
+            "nombre": p["nombre"],
+            "precio": float(p["precio"]),
+            "cantidad_vendida": p["cantidad_vendida"],
+            "porcentaje": round(porcentaje, 2),
+        })
+
+    return {
+        "total_ventas": total_ventas,
+        "productos": productos_con_porcentaje,
+    }
+
+# =====================================================
+# PRODUCTOS POR AGOTARSE
+# =====================================================
+
+@app.get("/productos_por_agotarse")
+def productos_por_agotarse(db=Depends(get_db)):
+    cur = db.cursor()
+
+    cur.execute("""
+        SELECT id, nombre, codigo_barras, stock, precio, precio_costo
+        FROM productos_sj
+        WHERE stock <= 2
+        ORDER BY stock ASC
+    """)
+    productos = cur.fetchall()
+
+    return [
+        {
+            "id": p["id"],
+            "nombre": p["nombre"],
+            "codigo_barras": p["codigo_barras"],
+            "stock": p["stock"],
+            "precio": float(p["precio"]),
+            "precio_costo": float(p["precio_costo"]) if p["precio_costo"] else 0,
+        }
+        for p in productos
+    ]
+
+# =====================================================
+# ÚLTIMAS VENTAS Y REPARACIONES
+# =====================================================
+
+from openpyxl import Workbook
+from io import BytesIO
+from fastapi.responses import StreamingResponse
+
+@app.get("/ultimas_ventas")
+def ultimas_ventas(
+    fecha_desde: str | None = None,
+    fecha_hasta: str | None = None,
+    exportar: bool = False,
+    db=Depends(get_db)
 ):
-    conn = get_db()
-    cur = conn.cursor()
+    cur = db.cursor()
 
-    foto_url = None
-    if foto:
-        foto_url = cloudinary.uploader.upload(foto.file)["secure_url"]
+    argentina_tz = pytz.timezone("America/Argentina/Buenos_Aires")
+    hoy = datetime.now(argentina_tz).strftime("%Y-%m-%d")
 
+    fecha_desde = fecha_desde or hoy
+    fecha_hasta = fecha_hasta or hoy
+
+    # =============================
+    # VENTAS
+    # =============================
     cur.execute("""
-        INSERT INTO productos_sj
-        (nombre, codigo_barras, stock, precio, precio_costo, categoria,
-         foto_url, num, color, bateria, precio_revendedor, condicion)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-    """, (
-        nombre.upper(), codigo_barras, stock, precio, precio_costo, categoria,
-        foto_url, num, color, bateria, precio_revendedor, condicion
-    ))
-    conn.commit()
-    conn.close()
-    return {"success": True}
-
-@app.delete("/productos/{id}")
-def eliminar_producto(id: int):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM productos_sj WHERE id=%s", (id,))
-    conn.commit()
-    conn.close()
-    return {"success": True}
-
-# =====================================================
-# VENTAS
-# =====================================================
-@app.post("/ventas")
-def registrar_venta(data: dict):
-    conn = get_db()
-    cur = conn.cursor()
-    fecha = datetime.now(arg_tz)
-
-    for item in data["items"]:
-        cur.execute("""
-            INSERT INTO ventas_sj
-            (producto_id, cantidad, fecha, nombre_manual,
-             tipo_pago, dni_cliente, tipo_precio)
-            VALUES (%s,%s,%s,%s,%s,%s,%s)
-        """, (
-            item.get("producto_id"),
-            item["cantidad"],
-            fecha,
-            item["nombre"],
-            data["tipo_pago"],
-            data.get("dni_cliente"),
-            item["tipo_precio"]
-        ))
-
-        if item.get("producto_id"):
-            cur.execute("""
-                UPDATE productos_sj
-                SET stock = stock - %s
-                WHERE id=%s
-            """, (item["cantidad"], item["producto_id"]))
-
-    conn.commit()
-    conn.close()
-    return {"success": True}
-
-@app.get("/ventas")
-def listar_ventas(fecha_desde: str, fecha_hasta: str):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT v.*, p.nombre
+        SELECT 
+            v.id AS venta_id,
+            p.nombre AS nombre_producto,
+            p.num AS num,
+            v.cantidad,
+            CASE
+                WHEN v.tipo_precio = 'revendedor' THEN p.precio_revendedor
+                ELSE p.precio
+            END AS precio_unitario,
+            v.cantidad *
+            CASE
+                WHEN v.tipo_precio = 'revendedor' THEN p.precio_revendedor
+                ELSE p.precio
+            END AS total,
+            v.fecha,
+            v.tipo_pago,
+            v.dni_cliente,
+            v.tipo_precio
         FROM ventas_sj v
-        LEFT JOIN productos_sj p ON v.producto_id=p.id
+        LEFT JOIN productos_sj p ON v.producto_id = p.id
         WHERE DATE(v.fecha) BETWEEN %s AND %s
         ORDER BY v.fecha DESC
     """, (fecha_desde, fecha_hasta))
-    data = cur.fetchall()
-    conn.close()
-    return data
+    ventas = cur.fetchall()
 
-@app.delete("/ventas/{id}")
-def anular_venta(id: int):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM ventas_sj WHERE id=%s", (id,))
-    conn.commit()
-    conn.close()
-    return {"success": True}
-
-# =====================================================
-# REPARACIONES
-# =====================================================
-@app.post("/reparaciones")
-def registrar_reparacion(data: dict):
-    conn = get_db()
-    cur = conn.cursor()
-
+    # =============================
+    # REPARACIONES
+    # =============================
     cur.execute("""
-        INSERT INTO equipos_sj
-        (tipo_reparacion, marca, modelo, tecnico, monto,
-         nombre_cliente, telefono, nro_orden, fecha, hora, estado)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'Por Reparar')
-    """, (
-        data["tipo_reparacion"],
-        data["marca"],
-        data["modelo"],
-        data["tecnico"],
-        data["monto"],
-        data["nombre_cliente"],
-        data["telefono"],
-        data["nro_orden"],
-        datetime.now().date(),
-        datetime.now().strftime("%H:%M:%S")
-    ))
-    conn.commit()
-    conn.close()
-    return {"success": True}
-
-@app.get("/reparaciones")
-def listar_reparaciones(fecha_desde: str, fecha_hasta: str):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT * FROM equipos_sj
-        WHERE fecha BETWEEN %s AND %s
-        ORDER BY nro_orden DESC
+        SELECT 
+            id AS reparacion_id,
+            nombre_servicio,
+            cantidad,
+            precio AS precio_unitario,
+            (cantidad * precio) AS total,
+            fecha,
+            tipo_pago
+        FROM reparaciones_sj
+        WHERE DATE(fecha) BETWEEN %s AND %s
+        ORDER BY fecha DESC
     """, (fecha_desde, fecha_hasta))
-    data = cur.fetchall()
-    conn.close()
-    return data
+    reparaciones = cur.fetchall()
 
-@app.patch("/reparaciones/estado")
-def actualizar_estado(data: dict):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        UPDATE equipos_sj SET estado=%s WHERE nro_orden=%s
-    """, (data["estado"], data["nro_orden"]))
-    conn.commit()
-    conn.close()
+    # =============================
+    # TOTALES POR PAGO
+    # =============================
+    total_ventas_por_pago = {}
+    for v in ventas:
+        total_ventas_por_pago[v["tipo_pago"]] = (
+            total_ventas_por_pago.get(v["tipo_pago"], 0) + (v["total"] or 0)
+        )
+
+    total_reparaciones_por_pago = {}
+    for r in reparaciones:
+        total_reparaciones_por_pago[r["tipo_pago"]] = (
+            total_reparaciones_por_pago.get(r["tipo_pago"], 0) + (r["total"] or 0)
+        )
+
+    # =============================
+    # EXPORTAR EXCEL
+    # =============================
+    if exportar:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Ventas"
+
+        ws.append([
+            "ID Venta", "Producto", "Cantidad", "Núm",
+            "Precio Unitario", "Total", "Fecha",
+            "Tipo de Pago", "DNI Cliente", "Tipo Precio"
+        ])
+
+        for v in ventas:
+            ws.append([
+                v["venta_id"],
+                v["nombre_producto"],
+                v["cantidad"],
+                v.get("num") or "",
+                v["precio_unitario"] or 0,
+                v["total"] or 0,
+                v["fecha"].strftime("%Y-%m-%d %H:%M:%S") if v["fecha"] else "",
+                v["tipo_pago"],
+                v["dni_cliente"] or "",
+                v["tipo_precio"].capitalize() if v["tipo_precio"] else "",
+            ])
+
+        output = BytesIO()
+        wb.save(output)
+        output.seek(0)
+
+        filename = f"ventas_{fecha_desde}_a_{fecha_hasta}.xlsx"
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+
+    return {
+        "ventas": ventas,
+        "reparaciones": reparaciones,
+        "totales_ventas_por_pago": total_ventas_por_pago,
+        "totales_reparaciones_por_pago": total_reparaciones_por_pago,
+        "fecha_desde": fecha_desde,
+        "fecha_hasta": fecha_hasta,
+    }
+
+# =====================================================
+# ANULAR VENTA
+# =====================================================
+
+@app.delete("/anular_venta/{venta_id}")
+def anular_venta(venta_id: int, db=Depends(get_db)):
+    cur = db.cursor()
+
+    cur.execute("SELECT id FROM ventas_sj WHERE id=%s", (venta_id,))
+    if not cur.fetchone():
+        raise HTTPException(status_code=404, detail="Venta no encontrada")
+
+    cur.execute("DELETE FROM ventas_sj WHERE id=%s", (venta_id,))
+    db.commit()
+
     return {"success": True}
 
-@app.delete("/reparaciones/{id}")
-def eliminar_reparacion(id: int):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM equipos_sj WHERE id=%s", (id,))
-    conn.commit()
-    conn.close()
+# =====================================================
+# ANULAR REPARACIÓN
+# =====================================================
+
+@app.delete("/anular_reparacion/{reparacion_id}")
+def anular_reparacion(reparacion_id: int, db=Depends(get_db)):
+    cur = db.cursor()
+
+    cur.execute("SELECT id FROM reparaciones_sj WHERE id=%s", (reparacion_id,))
+    if not cur.fetchone():
+        raise HTTPException(status_code=404, detail="Reparación no encontrada")
+
+    cur.execute("DELETE FROM reparaciones_sj WHERE id=%s", (reparacion_id,))
+    db.commit()
+
     return {"success": True}
 
 # =====================================================
 # EGRESOS
 # =====================================================
-@app.post("/egresos")
-def agregar_egreso(data: dict):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO egresos_sj (fecha, monto, descripcion, tipo_pago)
-        VALUES (%s,%s,%s,%s)
-    """, (
-        data["fecha"],
-        data["monto"],
-        data["descripcion"],
-        data["tipo_pago"]
-    ))
-    conn.commit()
-    conn.close()
-    return {"success": True}
 
 @app.get("/egresos")
-def listar_egresos():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM egresos_sj ORDER BY fecha DESC")
-    data = cur.fetchall()
-    conn.close()
-    return data
+def listar_egresos(db=Depends(get_db)):
+    cur = db.cursor()
+    cur.execute("""
+        SELECT id, fecha, monto, descripcion, tipo_pago
+        FROM egresos_sj
+        ORDER BY fecha DESC
+    """)
+    egresos = cur.fetchall()
 
-@app.delete("/egresos/{id}")
-def eliminar_egreso(id: int):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM egresos_sj WHERE id=%s", (id,))
-    conn.commit()
-    conn.close()
+    return [
+        {
+            "id": e["id"],
+            "fecha": e["fecha"],
+            "monto": float(e["monto"]),
+            "descripcion": e["descripcion"],
+            "tipo_pago": e["tipo_pago"],
+        }
+        for e in egresos
+    ]
+
+@app.post("/egresos")
+def agregar_egreso(data: dict, db=Depends(get_db)):
+    cur = db.cursor()
+    cur.execute("""
+        INSERT INTO egresos_sj (fecha, monto, descripcion, tipo_pago)
+        VALUES (%s, %s, %s, %s)
+    """, (
+        data["fecha"],
+        float(data["monto"]),
+        data["descripcion"],
+        data["tipo_pago"],
+    ))
+    db.commit()
+    return {"ok": True}
+
+@app.delete("/egresos/{egreso_id}")
+def eliminar_egreso(egreso_id: int, db=Depends(get_db)):
+    cur = db.cursor()
+    cur.execute("DELETE FROM egresos_sj WHERE id=%s", (egreso_id,))
+    db.commit()
+    return {"ok": True}
+
+# =====================================================
+# DASHBOARD
+# =====================================================
+
+@app.get("/dashboard")
+def dashboard(
+    fecha_desde: str | None = None,
+    fecha_hasta: str | None = None,
+    db=Depends(get_db)
+):
+    cur = db.cursor()
+
+    hoy = datetime.now().strftime("%Y-%m-%d")
+    fecha_desde = fecha_desde or hoy
+    fecha_hasta = fecha_hasta or hoy
+
+    # -----------------------------------------
+    # Total ventas productos
+    # -----------------------------------------
+    cur.execute("""
+        SELECT SUM(
+            v.cantidad *
+            CASE
+                WHEN v.tipo_precio = 'revendedor' THEN p.precio_revendedor
+                ELSE p.precio
+            END
+        ) AS total
+        FROM ventas_sj v
+        LEFT JOIN productos_sj p ON v.producto_id = p.id
+        WHERE DATE(v.fecha) BETWEEN %s AND %s
+    """, (fecha_desde, fecha_hasta))
+    total_ventas_productos = cur.fetchone()["total"] or 0
+
+    # -----------------------------------------
+    # Total reparaciones
+    # -----------------------------------------
+    cur.execute("""
+        SELECT SUM(precio) AS total
+        FROM reparaciones_sj
+        WHERE DATE(fecha) BETWEEN %s AND %s
+    """, (fecha_desde, fecha_hasta))
+    total_ventas_reparaciones = cur.fetchone()["total"] or 0
+
+    total_ventas = total_ventas_productos + total_ventas_reparaciones
+
+    # -----------------------------------------
+    # Total egresos
+    # -----------------------------------------
+    cur.execute("""
+        SELECT SUM(monto) AS total
+        FROM egresos_sj
+        WHERE DATE(fecha) BETWEEN %s AND %s
+    """, (fecha_desde, fecha_hasta))
+    total_egresos = cur.fetchone()["total"] or 0
+
+    # -----------------------------------------
+    # Costo productos vendidos
+    # -----------------------------------------
+    cur.execute("""
+        SELECT SUM(v.cantidad * p.precio_costo) AS total
+        FROM ventas_sj v
+        JOIN productos_sj p ON v.producto_id = p.id
+        WHERE DATE(v.fecha) BETWEEN %s AND %s
+    """, (fecha_desde, fecha_hasta))
+    total_costo = cur.fetchone()["total"] or 0
+
+    ganancia = total_ventas - total_egresos - total_costo
+
+    # -----------------------------------------
+    # Distribución ventas
+    # -----------------------------------------
+    cur.execute("""
+        SELECT 'Productos' AS tipo, SUM(
+            v.cantidad *
+            CASE
+                WHEN v.tipo_precio = 'revendedor' THEN p.precio_revendedor
+                ELSE p.precio
+            END
+        ) AS total
+        FROM ventas_sj v
+        LEFT JOIN productos_sj p ON v.producto_id = p.id
+        WHERE DATE(v.fecha) BETWEEN %s AND %s
+
+        UNION ALL
+
+        SELECT 'Reparaciones' AS tipo, SUM(precio)
+        FROM reparaciones_sj
+        WHERE DATE(fecha) BETWEEN %s AND %s
+    """, (fecha_desde, fecha_hasta, fecha_desde, fecha_hasta))
+
+    distribucion = cur.fetchall()
+
+    return {
+        "fecha_desde": fecha_desde,
+        "fecha_hasta": fecha_hasta,
+        "total_ventas": total_ventas,
+        "total_ventas_productos": total_ventas_productos,
+        "total_ventas_reparaciones": total_ventas_reparaciones,
+        "total_egresos": total_egresos,
+        "total_costo": total_costo,
+        "ganancia": ganancia,
+        "distribucion_ventas": [
+            {"tipo": d["tipo"], "total": d["total"] or 0}
+            for d in distribucion
+        ],
+    }
+
+# =====================================================
+# RESUMEN SEMANAL
+# =====================================================
+
+@app.get("/resumen_semanal")
+def resumen_semanal(db=Depends(get_db)):
+    hoy = datetime.now()
+    inicio_semana = hoy - timedelta(days=hoy.weekday())
+    inicio_semana_str = inicio_semana.strftime("%Y-%m-%d")
+
+    cur = db.cursor()
+    cur.execute("""
+        SELECT tipo_pago, SUM(total) AS total
+        FROM ventas_sj
+        WHERE fecha >= %s
+        GROUP BY tipo_pago
+    """, (inicio_semana_str,))
+
+    resumen = cur.fetchall()
+
+    return [
+        {
+            "tipo_pago": r["tipo_pago"],
+            "total": r["total"] or 0,
+        }
+        for r in resumen
+    ]
+
+# =====================================================
+# CAJA
+# =====================================================
+
+@app.get("/caja")
+def caja(
+    fecha_desde: str | None = None,
+    fecha_hasta: str | None = None,
+    db=Depends(get_db)
+):
+    argentina_tz = pytz.timezone("America/Argentina/Buenos_Aires")
+    hoy = datetime.now(argentina_tz).date()
+
+    fecha_desde = fecha_desde or hoy.strftime("%Y-%m-%d")
+    fecha_hasta = fecha_hasta or hoy.strftime("%Y-%m-%d")
+
+    cur = db.cursor()
+
+    # ------------------------
+    # Ventas
+    # ------------------------
+    cur.execute("""
+        SELECT 
+            v.tipo_pago,
+            (v.cantidad *
+            CASE
+                WHEN v.tipo_precio = 'revendedor' THEN p.precio_revendedor
+                ELSE p.precio
+            END) AS total
+        FROM ventas_sj v
+        JOIN productos_sj p ON v.producto_id = p.id
+        WHERE DATE(v.fecha) BETWEEN %s AND %s
+    """, (fecha_desde, fecha_hasta))
+    ventas = cur.fetchall()
+
+    # ------------------------
+    # Reparaciones
+    # ------------------------
+    cur.execute("""
+        SELECT tipo_pago, (cantidad * precio) AS total
+        FROM reparaciones_sj
+        WHERE DATE(fecha) BETWEEN %s AND %s
+    """, (fecha_desde, fecha_hasta))
+    reparaciones = cur.fetchall()
+
+    # ------------------------
+    # Egresos
+    # ------------------------
+    cur.execute("""
+        SELECT tipo_pago, monto
+        FROM egresos_sj
+        WHERE DATE(fecha) BETWEEN %s AND %s
+    """, (fecha_desde, fecha_hasta))
+    egresos = cur.fetchall()
+
+    total_por_pago = {}
+
+    for v in ventas:
+        total_por_pago[v["tipo_pago"]] = total_por_pago.get(v["tipo_pago"], 0) + v["total"]
+
+    for r in reparaciones:
+        total_por_pago[r["tipo_pago"]] = total_por_pago.get(r["tipo_pago"], 0) + r["total"]
+
+    egresos_por_pago = {}
+    for e in egresos:
+        egresos_por_pago[e["tipo_pago"]] = egresos_por_pago.get(e["tipo_pago"], 0) + e["monto"]
+
+    neto_por_pago = {}
+    for tipo_pago, total in total_por_pago.items():
+        neto_por_pago[tipo_pago] = total - egresos_por_pago.get(tipo_pago, 0)
+
+    return {
+        "fecha_desde": fecha_desde,
+        "fecha_hasta": fecha_hasta,
+        "neto_por_pago": neto_por_pago,
+    }
+
+# =====================================================
+# REPARACIONES
+# =====================================================
+
+import unicodedata
+
+def normalizar(texto: str):
+    return unicodedata.normalize("NFKD", texto).encode("ascii", "ignore").decode().lower().strip()
+
+@app.get("/reparaciones")
+def listar_reparaciones(
+    fecha_desde: str | None = None,
+    fecha_hasta: str | None = None,
+    db=Depends(get_db)
+):
+    fecha_desde = fecha_desde or (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    fecha_hasta = fecha_hasta or datetime.now().strftime("%Y-%m-%d")
+
+    cur = db.cursor()
+
+    # Últimos equipos
+    cur.execute("""
+        SELECT * FROM equipos_sj
+        WHERE fecha BETWEEN %s AND %s
+        ORDER BY nro_orden DESC
+    """, (fecha_desde, fecha_hasta))
+    equipos = cur.fetchall()
+
+    # Por técnico
+    cur.execute("""
+        SELECT tecnico, COUNT(*) AS cantidad
+        FROM equipos_sj
+        WHERE fecha BETWEEN %s AND %s
+        GROUP BY tecnico
+    """, (fecha_desde, fecha_hasta))
+    tecnicos = {r["tecnico"]: r["cantidad"] for r in cur.fetchall()}
+
+    # Por estado
+    cur.execute("""
+        SELECT estado, COUNT(*) AS cantidad
+        FROM equipos_sj
+        WHERE fecha BETWEEN %s AND %s
+        GROUP BY estado
+    """, (fecha_desde, fecha_hasta))
+
+    estados_raw = cur.fetchall()
+
+    estados = {
+        "por_reparar": 0,
+        "en_reparacion": 0,
+        "listo": 0,
+        "retirado": 0,
+        "no_salio": 0,
+    }
+
+    for r in estados_raw:
+        e = normalizar(r["estado"])
+        if e in ["por reparar", "por_reparar"]:
+            estados["por_reparar"] += r["cantidad"]
+        elif e in ["en reparacion", "en reparación", "en_reparacion"]:
+            estados["en_reparacion"] += r["cantidad"]
+        elif e == "listo":
+            estados["listo"] += r["cantidad"]
+        elif e == "retirado":
+            estados["retirado"] += r["cantidad"]
+        elif e in ["no salio", "no_salio"]:
+            estados["no_salio"] += r["cantidad"]
+        else:
+            estados[e] = r["cantidad"]
+
+    estados["total"] = sum(v for k, v in estados.items() if k != "total")
+
+    return {
+        "fecha_desde": fecha_desde,
+        "fecha_hasta": fecha_hasta,
+        "equipos": equipos,
+        "equipos_por_tecnico": tecnicos,
+        "estados": estados,
+    }
+
+# =====================================================
+# ELIMINAR REPARACIÓN (EQUIPO)
+# =====================================================
+
+@app.delete("/reparaciones/{id}")
+def eliminar_reparacion(id: int, db=Depends(get_db)):
+    cur = db.cursor()
+    cur.execute("DELETE FROM equipos_sj WHERE id = %s", (id,))
+    db.commit()
     return {"success": True}
 
 # =====================================================
-# CAJA / DASHBOARD
+# ACTUALIZAR ESTADO DE REPARACIÓN
 # =====================================================
-@app.get("/caja")
-def caja(fecha_desde: str, fecha_hasta: str):
-    conn = get_db()
+
+@app.post("/reparaciones/actualizar_estado")
+def actualizar_estado(data: dict, db=Depends(get_db)):
+    nro_orden = data["nro_orden"]
+    estado = data["estado"]
+
+    cur = db.cursor()
+    cur.execute("""
+        UPDATE equipos_sj
+        SET estado = %s
+        WHERE nro_orden = %s
+    """, (estado, nro_orden))
+    db.commit()
+
+    return {"success": True}
+
+# =====================================================
+# MERCADERÍA FALLADA
+# =====================================================
+
+@app.get("/mercaderia_fallada")
+def listar_mercaderia_fallada(db=Depends(get_db)):
+    cur = db.cursor()
+    cur.execute("""
+        SELECT mf.id, p.nombre, mf.cantidad, mf.fecha, mf.descripcion
+        FROM mercaderia_fallada mf
+        JOIN productos_sj p ON mf.producto_id = p.id
+        ORDER BY mf.fecha DESC
+    """)
+    return cur.fetchall()
+
+
+@app.post("/mercaderia_fallada")
+def registrar_mercaderia_fallada(data: dict, db=Depends(get_db)):
+    producto_id = data["producto_id"]
+    cantidad = int(data["cantidad"])
+    descripcion = data["descripcion"]
+    fecha = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    cur = db.cursor()
+    cur.execute("SELECT stock FROM productos_sj WHERE id=%s", (producto_id,))
+    prod = cur.fetchone()
+
+    if not prod or prod["stock"] < cantidad:
+        raise HTTPException(status_code=400, detail="Stock insuficiente")
+
+    cur.execute("""
+        INSERT INTO mercaderia_fallada (producto_id, cantidad, fecha, descripcion)
+        VALUES (%s, %s, %s, %s)
+    """, (producto_id, cantidad, fecha, descripcion))
+
+    cur.execute("""
+        UPDATE productos_sj
+        SET stock = stock - %s
+        WHERE id = %s
+    """, (cantidad, producto_id))
+
+    db.commit()
+    return {"success": True}
+
+# =====================================================
+# CATEGORÍAS
+# =====================================================
+
+def crear_tabla_categorias():
+    conn = psycopg2.connect(os.getenv("DATABASE_URL"), cursor_factory=DictCursor, sslmode="require")
     cur = conn.cursor()
-
     cur.execute("""
-        SELECT tipo_pago,
-        SUM(cantidad *
-        CASE WHEN tipo_precio='revendedor'
-        THEN p.precio_revendedor ELSE p.precio END) AS total
-        FROM ventas_sj v
-        JOIN productos_sj p ON v.producto_id=p.id
-        WHERE DATE(v.fecha) BETWEEN %s AND %s
-        GROUP BY tipo_pago
-    """, (fecha_desde, fecha_hasta))
-
-    ventas = cur.fetchall()
-
-    cur.execute("""
-        SELECT tipo_pago, SUM(monto) AS total
-        FROM egresos_sj
-        WHERE DATE(fecha) BETWEEN %s AND %s
-        GROUP BY tipo_pago
-    """, (fecha_desde, fecha_hasta))
-
-    egresos = cur.fetchall()
+        CREATE TABLE IF NOT EXISTS categorias_sj (
+            id SERIAL PRIMARY KEY,
+            nombre TEXT UNIQUE NOT NULL
+        )
+    """)
+    conn.commit()
     conn.close()
 
+crear_tabla_categorias()
+
+
+@app.get("/categorias")
+def listar_categorias(db=Depends(get_db)):
+    cur = db.cursor()
+    cur.execute("SELECT nombre FROM categorias_sj ORDER BY nombre")
+    return [r["nombre"] for r in cur.fetchall()]
+
+
+@app.post("/categorias")
+def agregar_categoria(data: dict, db=Depends(get_db)):
+    cur = db.cursor()
+    cur.execute(
+        "INSERT INTO categorias_sj (nombre) VALUES (%s) ON CONFLICT DO NOTHING",
+        (data["nombre"].strip(),)
+    )
+    db.commit()
+    return {"ok": True}
+
+
+@app.delete("/categorias/{nombre}")
+def eliminar_categoria(nombre: str, db=Depends(get_db)):
+    cur = db.cursor()
+    cur.execute("DELETE FROM categorias_sj WHERE nombre=%s", (nombre,))
+    db.commit()
+    return {"ok": True}
+
+# =====================================================
+# PRODUCTOS / STOCK
+# =====================================================
+
+@app.get("/productos")
+def listar_productos(busqueda: str | None = None, db=Depends(get_db)):
+    cur = db.cursor()
+
+    if busqueda:
+        cur.execute("""
+            SELECT *
+            FROM productos_sj
+            WHERE nombre ILIKE %s OR codigo_barras ILIKE %s OR num ILIKE %s
+        """, (f"%{busqueda}%", f"%{busqueda}%", f"%{busqueda}%"))
+    else:
+        cur.execute("SELECT * FROM productos_sj")
+
+    return cur.fetchall()
+
+
+@app.post("/productos")
+def agregar_producto(data: dict, db=Depends(get_db)):
+    cur = db.cursor()
+    cur.execute("""
+        INSERT INTO productos_sj (
+            nombre, codigo_barras, stock, precio, precio_costo,
+            foto_url, categoria, num, color, bateria, precio_revendedor, condicion
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+    """, (
+        data["nombre"].upper(),
+        data["codigo_barras"],
+        int(data["stock"]),
+        float(data["precio"]),
+        float(data["precio_costo"]),
+        data.get("foto_url"),
+        data.get("categoria"),
+        data.get("num"),
+        data.get("color"),
+        data.get("bateria"),
+        data.get("precio_revendedor"),
+        data.get("condicion"),
+    ))
+    db.commit()
+    return {"ok": True}
+
+
+@app.put("/productos/{id}")
+def editar_producto(id: int, data: dict, db=Depends(get_db)):
+    cur = db.cursor()
+    cur.execute("""
+        UPDATE productos_sj
+        SET nombre=%s, codigo_barras=%s, stock=%s, precio=%s, precio_costo=%s,
+            categoria=%s, num=%s, color=%s, bateria=%s, precio_revendedor=%s, condicion=%s
+        WHERE id=%s
+    """, (
+        data["nombre"].upper(),
+        data["codigo_barras"],
+        int(data["stock"]),
+        float(data["precio"]),
+        float(data["precio_costo"]),
+        data.get("categoria"),
+        data.get("num"),
+        data.get("color"),
+        data.get("bateria"),
+        data.get("precio_revendedor"),
+        data.get("condicion"),
+        id,
+    ))
+    db.commit()
+    return {"ok": True}
+
+
+@app.delete("/productos/{id}")
+def eliminar_producto(id: int, db=Depends(get_db)):
+    cur = db.cursor()
+    cur.execute("DELETE FROM productos_sj WHERE id=%s", (id,))
+    db.commit()
+    return {"ok": True}
+
+# =====================================================
+# TIENDA (PÚBLICA)
+# =====================================================
+
+@app.get("/tienda")
+def tienda(categoria: str | None = None, db=Depends(get_db)):
+    cur = db.cursor()
+
+    if categoria:
+        cur.execute("""
+            SELECT id, nombre, stock, precio, foto_url, categoria,
+                   color, bateria, condicion, precio_revendedor
+            FROM productos_sj
+            WHERE categoria=%s AND foto_url IS NOT NULL AND stock>0
+            ORDER BY nombre
+        """, (categoria,))
+    else:
+        cur.execute("""
+            SELECT id, nombre, stock, precio, foto_url, categoria,
+                   color, bateria, condicion, precio_revendedor
+            FROM productos_sj
+            WHERE foto_url IS NOT NULL AND stock>0
+            ORDER BY nombre
+        """)
+
+    productos = cur.fetchall()
+
+    cur.execute("""
+        SELECT DISTINCT categoria
+        FROM productos_sj
+        WHERE categoria IS NOT NULL
+        ORDER BY categoria
+    """)
+    categorias = [r[0] for r in cur.fetchall()]
+
     return {
-        "ventas": ventas,
-        "egresos": egresos
+        "productos": productos,
+        "categorias": categorias,
+        "categoria_seleccionada": categoria,
     }
 
 # =====================================================
 # EXPORTAR STOCK
 # =====================================================
+
+from openpyxl.styles import Font, Alignment, PatternFill
+from fastapi.responses import StreamingResponse
+
 @app.get("/exportar_stock")
-def exportar_stock():
-    conn = get_db()
-    cur = conn.cursor()
+def exportar_stock(db=Depends(get_db)):
+    cur = db.cursor()
     cur.execute("""
-        SELECT nombre, codigo_barras, stock, precio, precio_costo, precio_revendedor
+        SELECT id, nombre, codigo_barras, num, color, bateria,
+               condicion, stock, precio, precio_costo, precio_revendedor
         FROM productos_sj
         ORDER BY nombre
     """)
     productos = cur.fetchall()
-    conn.close()
 
     wb = Workbook()
     ws = wb.active
-    ws.append(["Nombre", "Código", "Stock", "Precio", "Costo", "Revendedor"])
+    ws.title = "Stock"
+
+    headers = [
+        "ID", "Nombre", "Código", "Núm", "Color", "Batería",
+        "Condición", "Stock", "Precio Venta", "Precio Costo", "Precio Rev."
+    ]
+    ws.append(headers)
+
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill(start_color="4B5563", end_color="4B5563", fill_type="solid")
+        cell.alignment = Alignment(horizontal="center")
+
     for p in productos:
         ws.append(list(p))
 
-    out = BytesIO()
-    wb.save(out)
-    out.seek(0)
+    for col in ws.columns:
+        ws.column_dimensions[col[0].column_letter].width = max(
+            len(str(c.value)) if c.value else 0 for c in col
+        ) + 2
+
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
 
     return StreamingResponse(
-        out,
+        output,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": "attachment; filename=stock.xlsx"}
     )
 
-# =====================================================
-# TIENDA
-# =====================================================
-@app.get("/tienda")
-def tienda(categoria: str | None = None):
-    conn = get_db()
-    cur = conn.cursor()
-
-    if categoria:
-        cur.execute("""
-            SELECT * FROM productos_sj
-            WHERE categoria=%s AND stock>0 AND foto_url IS NOT NULL
-        """, (categoria,))
-    else:
-        cur.execute("""
-            SELECT * FROM productos_sj
-            WHERE stock>0 AND foto_url IS NOT NULL
-        """)
-
-    productos = cur.fetchall()
-    conn.close()
-    return productos
-
-# =====================================================
-# RUN
-# =====================================================
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+if __name__ == '__main__':
+    import os
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
