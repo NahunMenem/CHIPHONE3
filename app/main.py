@@ -77,15 +77,50 @@ def productos(busqueda: str | None = None):
 
     if busqueda:
         cur.execute("""
-            SELECT * FROM productos_sj
-            WHERE nombre ILIKE %s OR codigo_barras ILIKE %s OR num ILIKE %s
+            SELECT
+                id,
+                nombre,
+                codigo_barras,
+                stock,
+                precio,
+                precio_costo,
+                categoria,
+                num,
+                color,
+                bateria,
+                precio_revendedor,
+                condicion
+            FROM productos_sj
+            WHERE nombre ILIKE %s
+               OR codigo_barras ILIKE %s
+               OR num ILIKE %s
+            ORDER BY nombre
         """, (f"%{busqueda}%", f"%{busqueda}%", f"%{busqueda}%"))
     else:
-        cur.execute("SELECT * FROM productos_sj")
+        cur.execute("""
+            SELECT
+                id,
+                nombre,
+                codigo_barras,
+                stock,
+                precio,
+                precio_costo,
+                categoria,
+                num,
+                color,
+                bateria,
+                precio_revendedor,
+                condicion
+            FROM productos_sj
+            ORDER BY nombre
+        """)
 
-    data = cur.fetchall()
+    columnas = [desc[0] for desc in cur.description]
+    data = [dict(zip(columnas, fila)) for fila in cur.fetchall()]
+
     conn.close()
     return data
+
 
 @app.post("/productos")
 def agregar_producto(
