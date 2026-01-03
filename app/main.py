@@ -31,6 +31,8 @@ print("☁️ CLOUDINARY_URL:", os.getenv("CLOUDINARY_URL"))
 
 from starlette.middleware.sessions import SessionMiddleware
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI
+import os
 
 app = FastAPI(title="Backend SJ")
 
@@ -38,7 +40,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
-        "https://chiphone.vercel.app",  # si usás Vercel
+        "https://chiphone3.vercel.app",  # ✅ FRONT REAL
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -48,9 +50,10 @@ app.add_middleware(
 app.add_middleware(
     SessionMiddleware,
     secret_key=os.getenv("SECRET_KEY", "change-me"),
-    same_site="none",     # 🔴 CLAVE
-    https_only=True,      # 🔴 CLAVE (Railway es HTTPS)
+    same_site="none",     # ✅ necesario para cross-site
+    https_only=True,      # ✅ Railway es HTTPS
 )
+
 
 
 # =====================================================
