@@ -952,7 +952,13 @@ def eliminar_categoria(nombre: str, db=Depends(get_db)):
 # =====================================================
 
 @app.get("/productos")
-def listar_productos(busqueda: str | None = None, db=Depends(get_db)):
+def listar_productos(
+    busqueda: str | None = None,
+    page: int = 1,
+    limit: int = 20,
+    db=Depends(get_db)
+):
+    offset = (page - 1) * limit
     cur = db.cursor(cursor_factory=DictCursor)
 
     if busqueda:
@@ -962,14 +968,34 @@ def listar_productos(busqueda: str | None = None, db=Depends(get_db)):
             WHERE nombre ILIKE %s
                OR codigo_barras ILIKE %s
                OR num ILIKE %s
-        """, (f"%{busqueda}%", f"%{busqueda}%", f"%{busqueda}%"))
+            ORDER BY id DESC
+            LIMIT %s OFFSET %s
+        """, (
+            f"%{busqueda}%",
+            f"%{busqueda}%",
+            f"%{busqueda}%",
+            limit,
+            offset
+        ))
     else:
-        cur.execute("SELECT * FROM productos_sj")
+        cur.execute("""
+            SELECT *
+            FROM productos_sj
+            ORDER BY id DESC
+            LIMIT %s OFFSET %s
+        """, (limit, offset))
 
     rows = cur.fetchall()
 
-    # 🔥 CONVERSIÓN CLAVE
-    return [dict(row) for row in rows]
+    # total (para paginación)
+    cur.execute("SELECT COUNT(*) FROM productos_sj")
+    total = cur.fetchone()[0]
+
+    return {
+        "items": [dict(r) for r in rows],
+        "total": total
+    }
+
 
 
 
