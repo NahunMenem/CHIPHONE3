@@ -1001,28 +1001,56 @@ def listar_productos(
 
 @app.post("/productos")
 def agregar_producto(data: dict, db=Depends(get_db)):
-    cur = db.cursor()
-    cur.execute("""
-        INSERT INTO productos_sj (
-            nombre, codigo_barras, stock, precio, precio_costo,
-            foto_url, categoria, num, color, bateria, precio_revendedor, condicion
-        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-    """, (
-        data["nombre"].upper(),
-        data["codigo_barras"],
-        int(data["stock"]),
-        float(data["precio"]),
-        float(data["precio_costo"]),
-        data.get("foto_url"),
-        data.get("categoria"),
-        data.get("num"),
-        data.get("color"),
-        data.get("bateria"),
-        data.get("precio_revendedor"),
-        data.get("condicion"),
-    ))
-    db.commit()
-    return {"ok": True}
+    try:
+        cur = db.cursor(cursor_factory=DictCursor)
+
+        cur.execute("""
+            INSERT INTO productos_sj (
+                nombre,
+                codigo_barras,
+                stock,
+                precio,
+                precio_costo,
+                foto_url,
+                categoria,
+                num,
+                color,
+                bateria,
+                precio_revendedor,
+                condicion
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """, (
+            data["nombre"].upper(),
+            data["codigo_barras"],
+            int(data["stock"]),
+            float(data["precio"]),
+            float(data["precio_costo"]),
+            data.get("foto_url"),
+            data.get("categoria"),
+            data.get("num"),
+            data.get("color"),
+            data.get("bateria"),
+            data.get("precio_revendedor"),
+            data.get("condicion"),
+        ))
+
+        db.commit()
+        return {"ok": True}
+
+    except KeyError as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=400,
+            detail=f"Falta el campo obligatorio: {e}"
+        )
+
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
+
 
 
 @app.put("/productos/{id}")
