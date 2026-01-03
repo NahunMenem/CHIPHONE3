@@ -3,6 +3,7 @@ from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
+from fastapi import UploadFile, File, HTTPException
 
 import psycopg2
 from psycopg2.extras import DictCursor
