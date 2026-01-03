@@ -1470,6 +1470,7 @@ def listar_transacciones(
             v.id,
             v.fecha,
             p.nombre AS producto,
+            p.num,
             v.cantidad,
             v.precio_unitario,
             v.total,
@@ -1492,9 +1493,10 @@ def listar_transacciones(
         SELECT
             id,
             fecha,
-            nombre_manual,
+            nombre_manual AS producto,
+            NULL AS num,
             cantidad,
-            precio_manual,
+            precio_manual AS precio_unitario,
             total,
             tipo_pago,
             dni_cliente,
@@ -1513,6 +1515,7 @@ def listar_transacciones(
         "ventas": ventas,
         "manuales": manuales
     }
+
 
 import pandas as pd
 from fastapi.responses import StreamingResponse
