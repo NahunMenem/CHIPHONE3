@@ -1004,14 +1004,23 @@ def listar_productos(
 # ==========================
 # SUBIDA DE IMÁGENES (Cloudinary)
 # ==========================
+from fastapi import UploadFile, File, HTTPException
+import cloudinary
+import cloudinary.uploader
+import traceback
+
 @app.post("/upload-imagen")
 async def upload_imagen(file: UploadFile = File(...)):
     try:
+        print("📷 Archivo recibido:", file.filename, file.content_type)
+
         result = cloudinary.uploader.upload(
             file.file,
             folder="productos",
             resource_type="image"
         )
+
+        print("✅ Cloudinary OK:", result.get("secure_url"))
 
         return {
             "ok": True,
@@ -1019,7 +1028,10 @@ async def upload_imagen(file: UploadFile = File(...)):
         }
 
     except Exception as e:
+        print("❌ ERROR CLOUDINARY")
+        print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/productos")
 def agregar_producto(data: dict, db=Depends(get_db)):
