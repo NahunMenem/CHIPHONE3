@@ -426,7 +426,7 @@ def productos_mas_vendidos_detalle(db=Depends(get_db)):
     """)
     total_ventas = cur.fetchone()["total"]
 
-    # Top 15 detallado
+    # Top 15
     cur.execute("""
         SELECT
             p.nombre,
@@ -447,9 +447,10 @@ def productos_mas_vendidos_detalle(db=Depends(get_db)):
             {
                 "nombre": p["nombre"],
                 "precio": float(p["precio"]),
-                "cantidad": int(p["unidades"]),
-                "porcentaje": round((p["unidades"] / total_ventas) * 100, 2)
-                if total_ventas else 0,
+                "unidades": int(p["unidades"]),
+                "porcentaje": round(
+                    (p["unidades"] / total_ventas) * 100, 2
+                ) if total_ventas else 0,
             }
             for p in productos
         ],
