@@ -40,7 +40,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
-        "https://chiphone3.vercel.app",  # ✅ FRONT REAL
+        "https://chiphone-3-front-i83mur9l3-nahundeveloper-gmailcoms-projects.vercel.app/",  # ✅ FRONT REAL
     ],
     allow_credentials=True,
     allow_methods=["*"],
