@@ -17,11 +17,14 @@ import cloudinary.uploader
 # CONFIG
 # =====================================================
 
+
 cloudinary.config(
-    cloud_name="dcbdjnpzo",
-    api_key="381622333637456",
-    api_secret="P1Pzvu85aCR02HuRSCnz76yzrgg"
+    cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
+    api_key=os.getenv("CLOUDINARY_API_KEY"),
+    api_secret=os.getenv("CLOUDINARY_API_SECRET"),
+    secure=True
 )
+
 
 app = FastAPI(title="Backend SJ")
 
@@ -997,7 +1000,25 @@ def listar_productos(
     }
 
 
+# ==========================
+# SUBIDA DE IMÁGENES (Cloudinary)
+# ==========================
+@app.post("/upload-imagen")
+async def upload_imagen(file: UploadFile = File(...)):
+    try:
+        result = cloudinary.uploader.upload(
+            file.file,
+            folder="productos",
+            resource_type="image"
+        )
 
+        return {
+            "ok": True,
+            "url": result["secure_url"]
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/productos")
 def agregar_producto(data: dict, db=Depends(get_db)):
