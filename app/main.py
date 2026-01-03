@@ -1407,12 +1407,11 @@ def listar_transacciones(
 ):
     cur = db.cursor()
 
-    # si viene solo fecha, agregamos rango completo del día
     desde_dt = datetime.fromisoformat(desde)
     hasta_dt = datetime.fromisoformat(hasta) + timedelta(days=1)
 
     # =========================
-    # VENTAS DE PRODUCTOS
+    # VENTAS PRODUCTOS
     # =========================
     cur.execute("""
         SELECT
@@ -1423,7 +1422,8 @@ def listar_transacciones(
             v.precio_unitario,
             v.total,
             v.tipo_pago,
-            v.dni_cliente
+            v.dni_cliente,
+            v.tipo_precio
         FROM ventas_sj v
         JOIN productos_sj p ON p.id = v.producto_id
         WHERE v.producto_id IS NOT NULL
@@ -1431,7 +1431,7 @@ def listar_transacciones(
         ORDER BY v.fecha DESC
     """, (desde_dt, hasta_dt))
 
-    ventas = cur.fetchall()
+    ventas = [dict(r) for r in cur.fetchall()]
 
     # =========================
     # VENTAS MANUALES
@@ -1445,14 +1445,16 @@ def listar_transacciones(
             precio_manual,
             total,
             tipo_pago,
-            dni_cliente
+            dni_cliente,
+            tipo_precio
         FROM ventas_sj
         WHERE producto_id IS NULL
         AND fecha BETWEEN %s AND %s
         ORDER BY fecha DESC
     """, (desde_dt, hasta_dt))
 
-    manuales = cur.fetchall()
+    manuales = [dict(r) for r in cur.fetchall()]
+
     cur.close()
 
     return {
