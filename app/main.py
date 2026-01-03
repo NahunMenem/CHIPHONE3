@@ -431,29 +431,56 @@ def productos_mas_vendidos_detalle(db=Depends(get_db)):
 # PRODUCTOS POR AGOTARSE
 # =====================================================
 
+# =====================================================
+# PRODUCTOS POR AGOTARSE (PAGINADO)
+# =====================================================
+
 @app.get("/productos_por_agotarse")
-def productos_por_agotarse(db=Depends(get_db)):
+def productos_por_agotarse(
+    page: int = 1,
+    db=Depends(get_db)
+):
     cur = db.cursor()
 
+    limit = 20
+    offset = (page - 1) * limit
+
+    # Total para paginación
+    cur.execute("""
+        SELECT COUNT(*) AS total
+        FROM productos_sj
+        WHERE stock <= 30
+    """)
+    total = cur.fetchone()["total"]
+
+    # Datos paginados
     cur.execute("""
         SELECT id, nombre, codigo_barras, stock, precio, precio_costo
         FROM productos_sj
-        WHERE stock <= 2
+        WHERE stock <= 30
         ORDER BY stock ASC
-    """)
+        LIMIT %s OFFSET %s
+    """, (limit, offset))
+
     productos = cur.fetchall()
 
-    return [
-        {
-            "id": p["id"],
-            "nombre": p["nombre"],
-            "codigo_barras": p["codigo_barras"],
-            "stock": p["stock"],
-            "precio": float(p["precio"]),
-            "precio_costo": float(p["precio_costo"]) if p["precio_costo"] else 0,
-        }
-        for p in productos
-    ]
+    return {
+        "page": page,
+        "limit": limit,
+        "total": total,
+        "productos": [
+            {
+                "id": p["id"],
+                "nombre": p["nombre"],
+                "codigo_barras": p["codigo_barras"],
+                "stock": p["stock"],
+                "precio": float(p["precio"]),
+                "precio_costo": float(p["precio_costo"]) if p["precio_costo"] else 0,
+            }
+            for p in productos
+        ],
+    }
+
 
 # =====================================================
 # ÚLTIMAS VENTAS Y REPARACIONES
