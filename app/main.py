@@ -173,9 +173,9 @@ def agregar_carrito(data: dict, request: Request, db=Depends(get_db)):
     }
 
     request.session["carrito"].append(item)
-    request.session.modified = True
 
     return {"ok": True, "carrito": request.session["carrito"]}
+
 
 @app.post("/carrito/agregar-manual")
 def agregar_manual(data: dict, request: Request):
@@ -191,9 +191,9 @@ def agregar_manual(data: dict, request: Request):
     }
 
     request.session["carrito"].append(item)
-    request.session.modified = True
 
     return {"ok": True}
+
 
 @app.post("/carrito/vaciar")
 def vaciar_carrito(request: Request):
