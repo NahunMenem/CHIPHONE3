@@ -1528,8 +1528,10 @@ def exportar_transacciones(
 
 from fastapi import HTTPException
 
+from fastapi import HTTPException
+
 @app.post("/transacciones/{venta_id}/anular")
-def anular_venta(
+def eliminar_transaccion(
     venta_id: int,
     db = Depends(get_db)
 ):
@@ -1540,8 +1542,7 @@ def anular_venta(
         SELECT
             id,
             producto_id,
-            cantidad,
-            anulada
+            cantidad
         FROM ventas_sj
         WHERE id = %s
     """, (venta_id,))
@@ -1550,20 +1551,9 @@ def anular_venta(
 
     if not venta:
         cur.close()
-        raise HTTPException(status_code=404, detail="Venta no encontrada")
-
-    if venta["anulada"]:
-        cur.close()
-        raise HTTPException(status_code=400, detail="La venta ya está anulada")
+        raise HTTPException(status_code=404, detail="Transacción no encontrada")
 
     try:
-        # 👉 Marcar como anulada
-        cur.execute("""
-            UPDATE ventas_sj
-            SET anulada = TRUE
-            WHERE id = %s
-        """, (venta_id,))
-
         # 👉 Si es producto, devolver stock
         if venta["producto_id"] is not None:
             cur.execute("""
@@ -1571,6 +1561,12 @@ def anular_venta(
                 SET stock = stock + %s
                 WHERE id = %s
             """, (venta["cantidad"], venta["producto_id"]))
+
+        # 👉 Eliminar transacción
+        cur.execute("""
+            DELETE FROM ventas_sj
+            WHERE id = %s
+        """, (venta_id,))
 
         db.commit()
         return {"ok": True}
