@@ -641,14 +641,33 @@ def anular_reparacion(reparacion_id: int, db=Depends(get_db)):
 # EGRESOS
 # =====================================================
 
+from datetime import datetime
+
 @app.get("/egresos")
-def listar_egresos(db=Depends(get_db)):
+def listar_egresos(
+    fecha_desde: str | None = None,
+    fecha_hasta: str | None = None,
+    db=Depends(get_db)
+):
     cur = db.cursor()
-    cur.execute("""
-        SELECT id, fecha, monto, descripcion, tipo_pago
-        FROM egresos_sj
-        ORDER BY fecha DESC
-    """)
+
+    if fecha_desde and fecha_hasta:
+        cur.execute("""
+            SELECT id, fecha, monto, descripcion, tipo_pago
+            FROM egresos_sj
+            WHERE fecha BETWEEN %s AND %s
+            ORDER BY fecha DESC
+        """, (
+            f"{fecha_desde} 00:00:00",
+            f"{fecha_hasta} 23:59:59",
+        ))
+    else:
+        cur.execute("""
+            SELECT id, fecha, monto, descripcion, tipo_pago
+            FROM egresos_sj
+            ORDER BY fecha DESC
+        """)
+
     egresos = cur.fetchall()
 
     return [
@@ -661,6 +680,7 @@ def listar_egresos(db=Depends(get_db)):
         }
         for e in egresos
     ]
+
 
 @app.post("/egresos")
 def agregar_egreso(data: dict, db=Depends(get_db)):
