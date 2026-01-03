@@ -1472,8 +1472,17 @@ def listar_transacciones(
             p.nombre AS producto,
             p.num,
             v.cantidad,
-            v.precio_unitario,
-            v.total,
+
+            CASE
+                WHEN v.tipo_precio = 'revendedor' THEN p.precio_revendedor
+                ELSE p.precio
+            END AS precio_unitario,
+
+            CASE
+                WHEN v.tipo_precio = 'revendedor' THEN p.precio_revendedor * v.cantidad
+                ELSE p.precio * v.cantidad
+            END AS total,
+
             v.tipo_pago,
             v.dni_cliente,
             v.tipo_precio
@@ -1515,6 +1524,7 @@ def listar_transacciones(
         "ventas": ventas,
         "manuales": manuales
     }
+
 
 
 import pandas as pd
