@@ -160,30 +160,40 @@ def agregar_carrito(data: dict, request: Request, db=Depends(get_db)):
     if "carrito" not in request.session:
         request.session["carrito"] = []
 
-    producto_id = data.get("producto_id")
+    producto_id = data["producto_id"]
     cantidad = int(data.get("cantidad", 1))
+    tipo_precio = data.get("tipo_precio", "venta")
 
-    cur = db.cursor()
-    cur.execute(
-        "SELECT id, nombre, stock, precio FROM productos_sj WHERE id=%s",
-        (producto_id,),
+    cur = db.cursor(cursor_factory=DictCursor)
+    cur.execute("""
+        SELECT id, nombre, stock, precio, precio_revendedor
+        FROM productos_sj
+        WHERE id = %s
+    """, (producto_id,))
+    producto = cur.fetchone()
+
+    if not producto:
+        raise HTTPException(404, "Producto no encontrado")
+
+    if producto["stock"] < cantidad:
+        raise HTTPException(400, "Stock insuficiente")
+
+    precio_usado = (
+        float(producto["precio_revendedor"])
+        if tipo_precio == "revendedor" and producto["precio_revendedor"]
+        else float(producto["precio"])
     )
-    prod = cur.fetchone()
 
-    if not prod or prod["stock"] < cantidad:
-        raise HTTPException(status_code=400, detail="Stock insuficiente")
-
-    item = {
-        "id": prod["id"],
-        "nombre": prod["nombre"],
-        "precio": float(prod["precio"]),
+    request.session["carrito"].append({
+        "id": producto["id"],
+        "nombre": producto["nombre"],
+        "precio": precio_usado,
         "cantidad": cantidad,
-        "tipo_precio": "venta",
-    }
+        "tipo_precio": tipo_precio
+    })
 
-    request.session["carrito"].append(item)
+    return {"ok": True}
 
-    return {"ok": True, "carrito": request.session["carrito"]}
 
 
 @app.post("/carrito/agregar-manual")
@@ -191,15 +201,13 @@ def agregar_manual(data: dict, request: Request):
     if "carrito" not in request.session:
         request.session["carrito"] = []
 
-    item = {
+    request.session["carrito"].append({
         "id": None,
         "nombre": data["nombre"],
         "precio": float(data["precio"]),
         "cantidad": int(data["cantidad"]),
-        "tipo_precio": "manual",
-    }
-
-    request.session["carrito"].append(item)
+        "tipo_precio": "manual"
+    })
 
     return {"ok": True}
 
@@ -215,6 +223,81 @@ def ver_carrito(request: Request):
     carrito = request.session.get("carrito", [])
     total = sum(i["precio"] * i["cantidad"] for i in carrito)
     return {"items": carrito, "total": total}
+
+@app.post("/ventas/registrar")
+def registrar_venta(data: dict, request: Request, db=Depends(get_db)):
+    carrito = request.session.get("carrito", [])
+
+    if not carrito:
+        raise HTTPException(400, "Carrito vacío")
+
+    tipo_pago = data["tipo_pago"]
+    dni_cliente = data["dni_cliente"]
+
+    tz = pytz.timezone("America/Argentina/Buenos_Aires")
+    fecha_actual = datetime.now(tz)
+
+    cur = db.cursor(cursor_factory=DictCursor)
+
+    for item in carrito:
+        producto_id = item["id"]
+        nombre = item["nombre"]
+        cantidad = int(item["cantidad"])
+
+        if producto_id:
+            # producto normal
+            cur.execute("""
+                SELECT precio, precio_revendedor, stock
+                FROM productos_sj
+                WHERE id = %s
+            """, (producto_id,))
+            producto = cur.fetchone()
+
+            if not producto or producto["stock"] < cantidad:
+                raise HTTPException(400, f"Sin stock para {nombre}")
+
+            cur.execute("""
+                INSERT INTO ventas_sj
+                (producto_id, cantidad, fecha, nombre_manual,
+                 tipo_pago, dni_cliente, tipo_precio, precio)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+            """, (
+                producto_id,
+                cantidad,
+                fecha_actual,
+                nombre,
+                tipo_pago,
+                dni_cliente,
+                item["tipo_precio"],
+                item["precio"]
+            ))
+
+            cur.execute("""
+                UPDATE productos_sj
+                SET stock = stock - %s
+                WHERE id = %s
+            """, (cantidad, producto_id))
+
+        else:
+            # servicio técnico
+            cur.execute("""
+                INSERT INTO reparaciones_sj
+                (nombre_servicio, precio, cantidad,
+                 tipo_pago, dni_cliente, fecha)
+                VALUES (%s,%s,%s,%s,%s,%s)
+            """, (
+                nombre,
+                item["precio"],
+                cantidad,
+                tipo_pago,
+                dni_cliente,
+                fecha_actual
+            ))
+
+    db.commit()
+    request.session.pop("carrito", None)
+
+    return {"ok": True}
 
 
 # =====================================================
@@ -343,6 +426,21 @@ def productos_por_agotarse(db=Depends(get_db)):
 # =====================================================
 # ÚLTIMAS VENTAS Y REPARACIONES
 # =====================================================
+@app.get("/ventas/buscar")
+def buscar_productos(busqueda: str, db=Depends(get_db)):
+    cur = db.cursor(cursor_factory=DictCursor)
+    cur.execute("""
+        SELECT id, nombre, codigo_barras, num, stock, precio, precio_revendedor
+        FROM productos_sj
+        WHERE codigo_barras = %s
+           OR nombre ILIKE %s
+           OR num ILIKE %s
+        ORDER BY nombre
+    """, (busqueda, f"%{busqueda}%", f"%{busqueda}%"))
+
+    return cur.fetchall()
+
+
 
 from openpyxl import Workbook
 from io import BytesIO
