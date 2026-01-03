@@ -1124,28 +1124,69 @@ def eliminar_producto(id: int, db=Depends(get_db)):
 # TIENDA (PÚBLICA)
 # =====================================================
 
+# =====================================================
+# TIENDA (PÚBLICA) - FIX DEFINITIVO
+# =====================================================
+
 @app.get("/tienda")
 def tienda(categoria: str | None = None, db=Depends(get_db)):
     cur = db.cursor()
 
     if categoria:
         cur.execute("""
-            SELECT id, nombre, stock, precio, foto_url, categoria,
-                   color, bateria, condicion, precio_revendedor
+            SELECT
+                id,
+                nombre,
+                stock,
+                precio,
+                foto_url,
+                categoria,
+                color,
+                bateria,
+                condicion,
+                precio_revendedor
             FROM productos_sj
-            WHERE categoria=%s AND foto_url IS NOT NULL AND stock>0
+            WHERE categoria=%s
+              AND foto_url IS NOT NULL
+              AND stock > 0
             ORDER BY nombre
         """, (categoria,))
     else:
         cur.execute("""
-            SELECT id, nombre, stock, precio, foto_url, categoria,
-                   color, bateria, condicion, precio_revendedor
+            SELECT
+                id,
+                nombre,
+                stock,
+                precio,
+                foto_url,
+                categoria,
+                color,
+                bateria,
+                condicion,
+                precio_revendedor
             FROM productos_sj
-            WHERE foto_url IS NOT NULL AND stock>0
+            WHERE foto_url IS NOT NULL
+              AND stock > 0
             ORDER BY nombre
         """)
 
-    productos = cur.fetchall()
+    rows = cur.fetchall()
+
+    productos = [
+        {
+            "id": r[0],
+            "nombre": r[1],
+            "stock": r[2],
+            "precio": float(r[3]) if r[3] is not None else 0,
+            "foto_url": r[4],
+            "categoria": r[5],
+            "color": r[6],
+            "bateria": r[7],
+            "condicion": r[8],
+            "precio_revendedor": float(r[9]) if r[9] is not None else 0,
+        }
+        for r in rows
+    ]
 
     cur.execute("""
         SELECT DISTINCT categoria
@@ -1160,6 +1201,7 @@ def tienda(categoria: str | None = None, db=Depends(get_db)):
         "categorias": categorias,
         "categoria_seleccionada": categoria,
     }
+
 
 # =====================================================
 # EXPORTAR STOCK
