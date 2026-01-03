@@ -227,12 +227,14 @@ def ver_carrito(request: Request):
     total = sum(i["precio"] * i["cantidad"] for i in carrito)
     return {"items": carrito, "total": total}
 
-from fastapi import Request, HTTPException
+from fastapi import Request, HTTPException, Depends
 from datetime import datetime
 
 @app.post("/ventas/registrar")
-async def registrar_venta(request: Request):
-    # 🔴 FIX CLAVE
+async def registrar_venta(
+    request: Request,
+    db = Depends(get_db)
+):
     data = await request.json()
 
     carrito = request.session.get("carrito", [])
@@ -245,8 +247,7 @@ async def registrar_venta(request: Request):
     if not tipo_pago:
         raise HTTPException(status_code=400, detail="Falta método de pago")
 
-    conn = get_db_connection()
-    cur = conn.cursor()
+    cur = db.cursor()
     fecha_actual = datetime.now()
 
     try:
@@ -312,24 +313,22 @@ async def registrar_venta(request: Request):
                     precio_unitario
                 ))
 
-                # actualizar stock
                 cur.execute("""
                     UPDATE productos_sj
                     SET stock = stock - %s
                     WHERE id = %s
                 """, (cantidad, producto_id))
 
-        conn.commit()
+        db.commit()
         request.session["carrito"] = []
         return {"ok": True}
 
     except Exception as e:
-        conn.rollback()
+        db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
     finally:
         cur.close()
-        conn.close()
 
 
 
