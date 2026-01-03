@@ -227,9 +227,13 @@ def ver_carrito(request: Request):
     total = sum(i["precio"] * i["cantidad"] for i in carrito)
     return {"items": carrito, "total": total}
 
+from fastapi import Request, HTTPException
+from datetime import datetime
+
 @app.post("/ventas/registrar")
-def registrar_venta(request: Request):
-    data = request.json() if hasattr(request, "json") else {}
+async def registrar_venta(request: Request):
+    # 🔴 FIX CLAVE
+    data = await request.json()
 
     carrito = request.session.get("carrito", [])
     if not carrito:
@@ -243,7 +247,6 @@ def registrar_venta(request: Request):
 
     conn = get_db_connection()
     cur = conn.cursor()
-
     fecha_actual = datetime.now()
 
     try:
