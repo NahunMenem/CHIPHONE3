@@ -1029,16 +1029,13 @@ async def upload_imagen(file: UploadFile = File(...)):
             resource_type="image"
         )
 
-        print("✅ Cloudinary OK:", result.get("secure_url"))
-
         return {
             "ok": True,
             "url": result["secure_url"]
         }
 
     except Exception as e:
-        print("❌ ERROR CLOUDINARY")
-        print(traceback.format_exc())
+        print("❌ ERROR CLOUDINARY", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
