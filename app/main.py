@@ -365,6 +365,10 @@ def precios_actualizados(tipo_precio: str = "venta", request: Request = None, db
 # PRODUCTOS MÁS VENDIDOS
 # =====================================================
 
+# =====================================================
+# PRODUCTOS MÁS VENDIDOS (TOP 15)
+# =====================================================
+
 @app.get("/productos_mas_vendidos")
 def productos_mas_vendidos(db=Depends(get_db)):
     cur = db.cursor()
@@ -373,12 +377,12 @@ def productos_mas_vendidos(db=Depends(get_db)):
         SELECT nombre, precio, cantidad_vendida
         FROM productos_sj
         ORDER BY cantidad_vendida DESC
-        LIMIT 5
+        LIMIT 15
     """)
     productos = cur.fetchall()
 
-    cur.execute("SELECT SUM(cantidad_vendida) FROM productos_sj")
-    total = cur.fetchone()[0] or 0
+    cur.execute("SELECT SUM(cantidad_vendida) AS total FROM productos_sj")
+    total = cur.fetchone()["total"] or 0
 
     return {
         "total_ventas": total,
@@ -392,6 +396,7 @@ def productos_mas_vendidos(db=Depends(get_db)):
             for p in productos
         ],
     }
+
 
 # =====================================================
 # PRODUCTOS MÁS VENDIDOS (DETALLADO)
