@@ -234,7 +234,7 @@ def registrar_venta(data: dict, request: Request, db=Depends(get_db)):
     if not carrito:
         raise HTTPException(400, "Carrito vacío")
 
-    tipo_pago = data["tipo_pago"]
+    tipo_pago = data["metodo_pago"]
     dni_cliente = data["dni_cliente"]
 
     tz = pytz.timezone("America/Argentina/Buenos_Aires")
