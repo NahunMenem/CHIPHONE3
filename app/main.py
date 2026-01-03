@@ -29,11 +29,17 @@ print("☁️ CLOUDINARY_URL:", os.getenv("CLOUDINARY_URL"))
 
 
 
+from starlette.middleware.sessions import SessionMiddleware
+from fastapi.middleware.cors import CORSMiddleware
+
 app = FastAPI(title="Backend SJ")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # luego se ajusta a Next
+    allow_origins=[
+        "http://localhost:3000",
+        "https://chiphone.vercel.app",  # si usás Vercel
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -42,7 +48,10 @@ app.add_middleware(
 app.add_middleware(
     SessionMiddleware,
     secret_key=os.getenv("SECRET_KEY", "change-me"),
+    same_site="none",     # 🔴 CLAVE
+    https_only=True,      # 🔴 CLAVE (Railway es HTTPS)
 )
+
 
 # =====================================================
 # DB
@@ -200,11 +209,13 @@ def vaciar_carrito(request: Request):
     request.session.pop("carrito", None)
     return {"ok": True}
 
+
 @app.get("/carrito")
 def ver_carrito(request: Request):
     carrito = request.session.get("carrito", [])
     total = sum(i["precio"] * i["cantidad"] for i in carrito)
     return {"items": carrito, "total": total}
+
 
 # =====================================================
 # PRECIOS ACTUALIZADOS
