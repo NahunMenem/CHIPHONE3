@@ -228,79 +228,106 @@ def ver_carrito(request: Request):
     return {"items": carrito, "total": total}
 
 @app.post("/ventas/registrar")
-def registrar_venta(data: dict, request: Request, db=Depends(get_db)):
+def registrar_venta(request: Request):
+    data = request.json() if hasattr(request, "json") else {}
+
     carrito = request.session.get("carrito", [])
-
     if not carrito:
-        raise HTTPException(400, "Carrito vacío")
+        raise HTTPException(status_code=400, detail="Carrito vacío")
 
-    tipo_pago = data["metodo_pago"]
-    dni_cliente = data["dni_cliente"]
+    dni_cliente = data.get("dni_cliente")
+    tipo_pago = data.get("metodo_pago")
 
-    tz = pytz.timezone("America/Argentina/Buenos_Aires")
-    fecha_actual = datetime.now(tz)
+    if not tipo_pago:
+        raise HTTPException(status_code=400, detail="Falta método de pago")
 
-    cur = db.cursor(cursor_factory=DictCursor)
+    conn = get_db_connection()
+    cur = conn.cursor()
 
-    for item in carrito:
-        producto_id = item["id"]
-        nombre = item["nombre"]
-        cantidad = int(item["cantidad"])
+    fecha_actual = datetime.now()
 
-        if producto_id:
-            # producto normal
-            cur.execute("""
-                SELECT precio, precio_revendedor, stock
-                FROM productos_sj
-                WHERE id = %s
-            """, (producto_id,))
-            producto = cur.fetchone()
+    try:
+        for item in carrito:
+            producto_id = item.get("id")
+            cantidad = int(item["cantidad"])
+            tipo_precio = item.get("tipo_precio")
 
-            if not producto or producto["stock"] < cantidad:
-                raise HTTPException(400, f"Sin stock para {nombre}")
+            # 👉 VENTA MANUAL
+            if producto_id is None:
+                nombre_manual = item["nombre"]
+                precio_manual = float(item["precio"])
+                total = precio_manual * cantidad
 
-            cur.execute("""
-                INSERT INTO ventas_sj
-                (producto_id, cantidad, fecha, nombre_manual,
-                 tipo_pago, dni_cliente, tipo_precio, precio)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
-            """, (
-                producto_id,
-                cantidad,
-                fecha_actual,
-                nombre,
-                tipo_pago,
-                dni_cliente,
-                item["tipo_precio"],
-                item["precio"]
-            ))
+                cur.execute("""
+                    INSERT INTO ventas_sj (
+                        producto_id,
+                        cantidad,
+                        fecha,
+                        nombre_manual,
+                        precio_manual,
+                        tipo_pago,
+                        dni_cliente,
+                        total,
+                        tipo_precio
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    None,
+                    cantidad,
+                    fecha_actual,
+                    nombre_manual,
+                    precio_manual,
+                    tipo_pago,
+                    dni_cliente,
+                    total,
+                    tipo_precio
+                ))
 
-            cur.execute("""
-                UPDATE productos_sj
-                SET stock = stock - %s
-                WHERE id = %s
-            """, (cantidad, producto_id))
+            # 👉 PRODUCTO NORMAL
+            else:
+                precio_unitario = float(item["precio"])
+                total = precio_unitario * cantidad
 
-        else:
-            # servicio técnico
-            cur.execute("""
-                INSERT INTO reparaciones_sj
-                (nombre_servicio, precio, cantidad,
-                 tipo_pago, dni_cliente, fecha)
-                VALUES (%s,%s,%s,%s,%s,%s)
-            """, (
-                nombre,
-                item["precio"],
-                cantidad,
-                tipo_pago,
-                dni_cliente,
-                fecha_actual
-            ))
+                cur.execute("""
+                    INSERT INTO ventas_sj (
+                        producto_id,
+                        cantidad,
+                        fecha,
+                        tipo_pago,
+                        dni_cliente,
+                        total,
+                        tipo_precio,
+                        precio_unitario
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    producto_id,
+                    cantidad,
+                    fecha_actual,
+                    tipo_pago,
+                    dni_cliente,
+                    total,
+                    tipo_precio,
+                    precio_unitario
+                ))
 
-    db.commit()
-    request.session.pop("carrito", None)
+                # actualizar stock
+                cur.execute("""
+                    UPDATE productos_sj
+                    SET stock = stock - %s
+                    WHERE id = %s
+                """, (cantidad, producto_id))
 
-    return {"ok": True}
+        conn.commit()
+        request.session["carrito"] = []
+        return {"ok": True}
+
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+    finally:
+        cur.close()
+        conn.close()
+
 
 
 # =====================================================
