@@ -1395,6 +1395,136 @@ def exportar_stock(db=Depends(get_db)):
         headers={"Content-Disposition": "attachment; filename=stock.xlsx"}
     )
 
+
+from fastapi import Depends, Query
+from datetime import datetime, timedelta
+
+@app.get("/transacciones")
+def listar_transacciones(
+    desde: str = Query(...),
+    hasta: str = Query(...),
+    db = Depends(get_db)
+):
+    cur = db.cursor()
+
+    # si viene solo fecha, agregamos rango completo del día
+    desde_dt = datetime.fromisoformat(desde)
+    hasta_dt = datetime.fromisoformat(hasta) + timedelta(days=1)
+
+    # =========================
+    # VENTAS DE PRODUCTOS
+    # =========================
+    cur.execute("""
+        SELECT
+            v.id,
+            v.fecha,
+            p.nombre AS producto,
+            v.cantidad,
+            v.precio_unitario,
+            v.total,
+            v.tipo_pago,
+            v.dni_cliente
+        FROM ventas_sj v
+        JOIN productos_sj p ON p.id = v.producto_id
+        WHERE v.producto_id IS NOT NULL
+        AND v.fecha BETWEEN %s AND %s
+        ORDER BY v.fecha DESC
+    """, (desde_dt, hasta_dt))
+
+    ventas = cur.fetchall()
+
+    # =========================
+    # VENTAS MANUALES
+    # =========================
+    cur.execute("""
+        SELECT
+            id,
+            fecha,
+            nombre_manual,
+            cantidad,
+            precio_manual,
+            total,
+            tipo_pago,
+            dni_cliente
+        FROM ventas_sj
+        WHERE producto_id IS NULL
+        AND fecha BETWEEN %s AND %s
+        ORDER BY fecha DESC
+    """, (desde_dt, hasta_dt))
+
+    manuales = cur.fetchall()
+    cur.close()
+
+    return {
+        "ventas": ventas,
+        "manuales": manuales
+    }
+
+import pandas as pd
+from fastapi.responses import StreamingResponse
+from io import BytesIO
+
+@app.get("/transacciones/exportar")
+def exportar_transacciones(
+    desde: str,
+    hasta: str,
+    db = Depends(get_db)
+):
+    cur = db.cursor()
+
+    desde_dt = datetime.fromisoformat(desde)
+    hasta_dt = datetime.fromisoformat(hasta) + timedelta(days=1)
+
+    # ventas
+    cur.execute("""
+        SELECT
+            v.fecha,
+            p.nombre AS producto,
+            v.cantidad,
+            v.precio_unitario,
+            v.total,
+            v.tipo_pago,
+            v.dni_cliente
+        FROM ventas_sj v
+        JOIN productos_sj p ON p.id = v.producto_id
+        WHERE v.producto_id IS NOT NULL
+        AND v.fecha BETWEEN %s AND %s
+    """, (desde_dt, hasta_dt))
+    ventas_df = pd.DataFrame(cur.fetchall(), columns=[c.name for c in cur.description])
+
+    # manuales
+    cur.execute("""
+        SELECT
+            fecha,
+            nombre_manual,
+            cantidad,
+            precio_manual,
+            total,
+            tipo_pago,
+            dni_cliente
+        FROM ventas_sj
+        WHERE producto_id IS NULL
+        AND fecha BETWEEN %s AND %s
+    """, (desde_dt, hasta_dt))
+    manuales_df = pd.DataFrame(cur.fetchall(), columns=[c.name for c in cur.description])
+
+    cur.close()
+
+    # Excel
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        ventas_df.to_excel(writer, sheet_name="Ventas", index=False)
+        manuales_df.to_excel(writer, sheet_name="Ventas Manuales", index=False)
+
+    output.seek(0)
+
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=transacciones.xlsx"}
+    )
+
+
 if __name__ == '__main__':
     import os
     port = int(os.environ.get('PORT', 5000))
