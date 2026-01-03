@@ -1526,6 +1526,62 @@ def exportar_transacciones(
         headers={"Content-Disposition": "attachment; filename=transacciones.xlsx"}
     )
 
+from fastapi import HTTPException
+
+@app.post("/transacciones/{venta_id}/anular")
+def anular_venta(
+    venta_id: int,
+    db = Depends(get_db)
+):
+    cur = db.cursor()
+
+    # Buscar venta
+    cur.execute("""
+        SELECT
+            id,
+            producto_id,
+            cantidad,
+            anulada
+        FROM ventas_sj
+        WHERE id = %s
+    """, (venta_id,))
+
+    venta = cur.fetchone()
+
+    if not venta:
+        cur.close()
+        raise HTTPException(status_code=404, detail="Venta no encontrada")
+
+    if venta["anulada"]:
+        cur.close()
+        raise HTTPException(status_code=400, detail="La venta ya está anulada")
+
+    try:
+        # 👉 Marcar como anulada
+        cur.execute("""
+            UPDATE ventas_sj
+            SET anulada = TRUE
+            WHERE id = %s
+        """, (venta_id,))
+
+        # 👉 Si es producto, devolver stock
+        if venta["producto_id"] is not None:
+            cur.execute("""
+                UPDATE productos_sj
+                SET stock = stock + %s
+                WHERE id = %s
+            """, (venta["cantidad"], venta["producto_id"]))
+
+        db.commit()
+        return {"ok": True}
+
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+    finally:
+        cur.close()
+
 
 if __name__ == '__main__':
     import os
