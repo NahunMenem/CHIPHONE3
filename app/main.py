@@ -373,25 +373,37 @@ def precios_actualizados(tipo_precio: str = "venta", request: Request = None, db
 def productos_mas_vendidos(db=Depends(get_db)):
     cur = db.cursor()
 
+    # Total general de unidades vendidas
     cur.execute("""
-        SELECT nombre, precio, cantidad_vendida
-        FROM productos_sj
-        ORDER BY cantidad_vendida DESC
+        SELECT COALESCE(SUM(cantidad), 0) AS total
+        FROM ventas_sj
+        WHERE producto_id IS NOT NULL
+    """)
+    total = cur.fetchone()["total"]
+
+    # Top 15 productos reales
+    cur.execute("""
+        SELECT
+            p.nombre,
+            p.precio,
+            SUM(v.cantidad) AS unidades
+        FROM ventas_sj v
+        JOIN productos_sj p ON p.id = v.producto_id
+        WHERE v.producto_id IS NOT NULL
+        GROUP BY p.id, p.nombre, p.precio
+        ORDER BY unidades DESC
         LIMIT 15
     """)
     productos = cur.fetchall()
 
-    cur.execute("SELECT SUM(cantidad_vendida) AS total FROM productos_sj")
-    total = cur.fetchone()["total"] or 0
-
     return {
-        "total_ventas": total,
+        "total_ventas": int(total),
         "productos": [
             {
                 "nombre": p["nombre"],
                 "precio": float(p["precio"]),
-                "cantidad": p["cantidad_vendida"],
-                "porcentaje": round((p["cantidad_vendida"] / total) * 100, 2) if total else 0,
+                "unidades": int(p["unidades"]),
+                "porcentaje": round((p["unidades"] / total) * 100, 2) if total else 0,
             }
             for p in productos
         ],
@@ -406,31 +418,43 @@ def productos_mas_vendidos(db=Depends(get_db)):
 def productos_mas_vendidos_detalle(db=Depends(get_db)):
     cur = db.cursor()
 
+    # Total general
     cur.execute("""
-        SELECT nombre, precio, cantidad_vendida
-        FROM productos_sj
-        ORDER BY cantidad_vendida DESC
-        LIMIT 5
+        SELECT COALESCE(SUM(cantidad), 0) AS total
+        FROM ventas_sj
+        WHERE producto_id IS NOT NULL
+    """)
+    total_ventas = cur.fetchone()["total"]
+
+    # Top 15 detallado
+    cur.execute("""
+        SELECT
+            p.nombre,
+            p.precio,
+            SUM(v.cantidad) AS unidades
+        FROM ventas_sj v
+        JOIN productos_sj p ON p.id = v.producto_id
+        WHERE v.producto_id IS NOT NULL
+        GROUP BY p.id, p.nombre, p.precio
+        ORDER BY unidades DESC
+        LIMIT 15
     """)
     productos = cur.fetchall()
 
-    cur.execute("SELECT SUM(cantidad_vendida) FROM productos_sj")
-    total_ventas = cur.fetchone()[0] or 0
-
-    productos_con_porcentaje = []
-    for p in productos:
-        porcentaje = (p["cantidad_vendida"] / total_ventas * 100) if total_ventas > 0 else 0
-        productos_con_porcentaje.append({
-            "nombre": p["nombre"],
-            "precio": float(p["precio"]),
-            "cantidad_vendida": p["cantidad_vendida"],
-            "porcentaje": round(porcentaje, 2),
-        })
-
     return {
-        "total_ventas": total_ventas,
-        "productos": productos_con_porcentaje,
+        "total_ventas": int(total_ventas),
+        "productos": [
+            {
+                "nombre": p["nombre"],
+                "precio": float(p["precio"]),
+                "cantidad": int(p["unidades"]),
+                "porcentaje": round((p["unidades"] / total_ventas) * 100, 2)
+                if total_ventas else 0,
+            }
+            for p in productos
+        ],
     }
+
 
 # =====================================================
 # PRODUCTOS POR AGOTARSE
