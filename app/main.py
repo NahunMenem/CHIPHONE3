@@ -1433,6 +1433,62 @@ def tienda(categoria: str | None = None, db=Depends(get_db)):
 from openpyxl.styles import Font, Alignment, PatternFill
 from fastapi.responses import StreamingResponse
 
+EXCEL_HEADER_FILL = "4B5563"
+
+
+def _crear_hoja_excel(wb: Workbook, titulo: str):
+    if wb.active and wb.active.max_row == 1 and wb.active.max_column == 1 and wb.active["A1"].value is None:
+        ws = wb.active
+        ws.title = titulo[:31]
+        return ws
+    return wb.create_sheet(title=titulo[:31])
+
+
+def _estilizar_encabezado(ws):
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill(
+            start_color=EXCEL_HEADER_FILL,
+            end_color=EXCEL_HEADER_FILL,
+            fill_type="solid",
+        )
+        cell.alignment = Alignment(horizontal="center")
+
+
+def _ajustar_columnas(ws):
+    for columna in ws.columns:
+        ancho = max(len(str(celda.value)) if celda.value is not None else 0 for celda in columna)
+        ws.column_dimensions[columna[0].column_letter].width = min(ancho + 2, 60)
+
+
+def _agregar_hoja_desde_query(wb: Workbook, cursor, titulo: str, query: str, params=None):
+    ws = _crear_hoja_excel(wb, titulo)
+
+    try:
+        cursor.execute(query, params or ())
+        columnas = [desc[0] for desc in cursor.description] if cursor.description else []
+        filas = cursor.fetchall()
+
+        if not columnas:
+            ws.append(["mensaje"])
+            ws.append(["La consulta no devolvio columnas"])
+            return
+
+        ws.append(columnas)
+        _estilizar_encabezado(ws)
+
+        for fila in filas:
+            ws.append([fila[columna] for columna in columnas])
+
+        if not filas:
+            ws.append(["Sin datos"] + [""] * (len(columnas) - 1))
+
+        _ajustar_columnas(ws)
+
+    except Exception as e:
+        ws.append(["error"])
+        ws.append([str(e)])
+        _ajustar_columnas(ws)
 @app.get("/exportar_stock")
 def exportar_stock(db=Depends(get_db)):
     cur = db.cursor()
@@ -1478,6 +1534,145 @@ def exportar_stock(db=Depends(get_db)):
     )
 
 
+@app.get("/exportar_todo")
+@app.get("/exportar/todo")
+def exportar_todo_excel(db=Depends(get_db)):
+    cur = db.cursor()
+    wb = Workbook()
+
+    consultas = [
+        (
+            "stock_completo",
+            """
+            SELECT *
+            FROM productos_sj
+            ORDER BY id DESC
+            """,
+        ),
+        (
+            "ventas",
+            """
+            SELECT *
+            FROM ventas_sj
+            ORDER BY fecha DESC, id DESC
+            """,
+        ),
+        (
+            "reparaciones",
+            """
+            SELECT *
+            FROM reparaciones_sj
+            ORDER BY fecha DESC, id DESC
+            """,
+        ),
+        (
+            "equipos_sj",
+            """
+            SELECT *
+            FROM equipos_sj
+            ORDER BY id DESC
+            """,
+        ),
+        (
+            "egresos",
+            """
+            SELECT *
+            FROM egresos_sj
+            ORDER BY fecha DESC, id DESC
+            """,
+        ),
+        (
+            "mercaderia_fallada",
+            """
+            SELECT
+                mf.*,
+                p.nombre AS producto_nombre,
+                p.codigo_barras AS producto_codigo_barras
+            FROM mercaderia_fallada mf
+            LEFT JOIN productos_sj p ON p.id = mf.producto_id
+            ORDER BY mf.fecha DESC, mf.id DESC
+            """,
+        ),
+        (
+            "categorias",
+            """
+            SELECT *
+            FROM categorias_sj
+            ORDER BY nombre
+            """,
+        ),
+        (
+            "usuarios",
+            """
+            SELECT id, username, role
+            FROM usuarios
+            ORDER BY id
+            """,
+        ),
+        (
+            "tienda_publica",
+            """
+            SELECT
+                id,
+                nombre,
+                stock,
+                precio,
+                foto_url,
+                categoria,
+                color,
+                bateria,
+                condicion,
+                precio_revendedor
+            FROM productos_sj
+            WHERE foto_url IS NOT NULL
+              AND stock > 0
+            ORDER BY nombre
+            """,
+        ),
+        (
+            "por_agotarse",
+            """
+            SELECT id, nombre, codigo_barras, stock, precio, precio_costo
+            FROM productos_sj
+            WHERE stock <= 30
+            ORDER BY stock ASC, nombre ASC
+            """,
+        ),
+        (
+            "mas_vendidos",
+            """
+            SELECT
+                p.id,
+                p.nombre,
+                p.codigo_barras,
+                p.num,
+                SUM(v.cantidad) AS unidades_vendidas,
+                MIN(p.precio) AS precio_actual,
+                MIN(p.precio_costo) AS precio_costo_actual
+            FROM ventas_sj v
+            JOIN productos_sj p ON p.id = v.producto_id
+            WHERE v.producto_id IS NOT NULL
+            GROUP BY p.id, p.nombre, p.codigo_barras, p.num
+            ORDER BY unidades_vendidas DESC, p.nombre ASC
+            """,
+        ),
+    ]
+
+    for titulo, query in consultas:
+        _agregar_hoja_desde_query(wb, cur, titulo, query)
+
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"exportacion_completa_{timestamp}.xlsx"
+
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
 from fastapi import Depends, Query
 from datetime import datetime, timedelta
 
